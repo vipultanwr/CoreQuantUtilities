@@ -25,30 +25,39 @@ from talib import abstract
 
 
 def getTACombinedSignals(input_df, returnall=False):
+    # Create a copy and normalize column names to lowercase for talib compatibility
+    df = input_df.copy()
+    df.columns = [col.lower() for col in df.columns]
+
+    # Check for required columns
+    required_cols = ['open', 'high', 'low', 'close', 'volume']
+    if not all(col in df.columns for col in required_cols):
+        raise ValueError(f"Input DataFrame must contain the following columns (case-insensitive): {required_cols}")
+
     all_funcs = talib.get_functions()
 
     # Creating a pandas dataframe which will contain strategy signal in each column
-    signals = pd.DataFrame(index=input_df.index)
+    signals = pd.DataFrame(index=df.index)
     # Adding the most basic indicator which will be used in many other signals
-    ma_signal = np.where(abstract.Function("MA")(input_df) < input_df.close, 1, np.where(abstract.Function("MA")(input_df) > input_df.close, -1, 0))
+    ma_signal = np.where(abstract.Function("MA")(df) < df.close, 1, np.where(abstract.Function("MA")(df) > df.close, -1, 0))
     signals["MA"] = ma_signal
 
     # RSI is needed for HT_TRENDMODE
-    rsi_signal = np.where(abstract.Function("RSI")(input_df) < 30, 1, np.where(abstract.Function("RSI")(input_df) > 70, -1, 0))
+    rsi_signal = np.where(abstract.Function("RSI")(df) < 30, 1, np.where(abstract.Function("RSI")(df) > 70, -1, 0))
     signals["RSI"] = rsi_signal
 
     all_signals = {}
-    all_signals.update(_get_candle_pattern_signals(input_df, all_funcs))
-    all_signals.update(_get_price_transform_signals(input_df, all_funcs))
-    all_signals.update(_get_volume_based_signals(input_df))
-    all_signals.update(_get_volatility_based_signals(input_df, ma_signal))
-    all_signals.update(_get_statistical_signals(input_df, ma_signal))
-    all_signals.update(_get_momentum_signals(input_df, ma_signal))
-    all_signals.update(_get_overlap_studies_signals(input_df))
-    all_signals.update(_get_math_operator_signals(input_df))
-    all_signals.update(_get_hilbert_transform_signals(input_df, ma_signal, rsi_signal))
+    all_signals.update(_get_candle_pattern_signals(df, all_funcs))
+    all_signals.update(_get_price_transform_signals(df, all_funcs))
+    all_signals.update(_get_volume_based_signals(df))
+    all_signals.update(_get_volatility_based_signals(df, ma_signal))
+    all_signals.update(_get_statistical_signals(df, ma_signal))
+    all_signals.update(_get_momentum_signals(df, ma_signal))
+    all_signals.update(_get_overlap_studies_signals(df))
+    all_signals.update(_get_math_operator_signals(df))
+    all_signals.update(_get_hilbert_transform_signals(df, ma_signal, rsi_signal))
 
-    signals = pd.concat([signals, pd.DataFrame(all_signals, index=input_df.index)], axis=1)
+    signals = pd.concat([signals, pd.DataFrame(all_signals, index=df.index)], axis=1)
 
     if returnall:
         return signals

@@ -7,20 +7,43 @@ import warnings
 warnings.filterwarnings('ignore')
 
 class StrategyBacktester:
-    def __init__(self, commission=0.001, slippage=0.001):
+    def __init__(self, commission=0.001, slippage=0.001, time_horizon='1d'):
         """
         Initialize the backtester
         
         Parameters:
         commission: Commission rate (0.001 = 0.1%)
         slippage: Slippage rate (0.001 = 0.1%)
+        time_horizon: The data frequency for annualization.
+                      Supported values: '1m', '5m', '15m', '30m', '1h', '1d', '1w', '1mo'.
         """
         self.commission = commission
         self.slippage = slippage
+        self.time_horizon = time_horizon
+        self.periods_per_year = self._get_periods_per_year(time_horizon)
         self.results = None
         self.trades = []
         
-    def backtest(self, df, price_col='close', signal_col='Signals'):
+    def _get_periods_per_year(self, time_horizon):
+        """Maps time horizon string to periods per year."""
+        TRADING_DAYS_PER_YEAR = 252
+        TRADING_HOURS_PER_DAY = 6.5  # For US equities; adjust for other markets
+
+        horizon_map = {
+            '1m': TRADING_DAYS_PER_YEAR * TRADING_HOURS_PER_DAY * 60,
+            '5m': TRADING_DAYS_PER_YEAR * TRADING_HOURS_PER_DAY * (60 / 5),
+            '15m': TRADING_DAYS_PER_YEAR * TRADING_HOURS_PER_DAY * (60 / 15),
+            '30m': TRADING_DAYS_PER_YEAR * TRADING_HOURS_PER_DAY * (60 / 30),
+            '1h': TRADING_DAYS_PER_YEAR * TRADING_HOURS_PER_DAY,
+            '1d': TRADING_DAYS_PER_YEAR,
+            '1w': 52,
+            '1mo': 12,
+        }
+        if time_horizon not in horizon_map:
+            raise ValueError(f"Unsupported time_horizon: '{time_horizon}'. Supported values are {list(horizon_map.keys())}")
+        return horizon_map[time_horizon]
+        
+    def backtest(self, df, price_col='close', signal_col='Signals', date_col='date'):
         """
         Run the backtest on the provided DataFrame
         
@@ -28,10 +51,16 @@ class StrategyBacktester:
         df: DataFrame with OHLCV data and signals
         price_col: Column name for price data
         signal_col: Column name for signals (1=buy, -1=sell, 0=hold)
+        date_col: Column name for date/datetime data
         """
         # Make a copy to avoid modifying original data
-        data = df.copy()
-        data = data.sort_values('date').reset_index(drop=True)
+        data = df.copy()        
+        # Normalize column names to lowercase for consistency
+        data.columns = [col.lower() for col in data.columns]
+        price_col = price_col.lower()
+        signal_col = signal_col.lower()
+        date_col = date_col.lower()
+        data = data.sort_values(date_col).reset_index(drop=True)
         
         # Initialize tracking variables
         position = 0  # Current position: 1=long, -1=short, 0=neutral
@@ -61,7 +90,7 @@ class StrategyBacktester:
                     pnl_percentage = (entry_price - current_price) / entry_price
                     trades.append({
                         'entry_date': entry_date,
-                        'exit_date': data.iloc[i]['date'],
+                        'exit_date': data.iloc[i][date_col],
                         'entry_price': entry_price,
                         'exit_price': current_price,
                         'position': 'SHORT',
@@ -72,7 +101,7 @@ class StrategyBacktester:
                 
                 # Open long position
                 entry_price = current_price * (1 + self.slippage)
-                entry_date = data.iloc[i]['date']
+                entry_date = data.iloc[i][date_col]
                 position = 1
                 # Apply commission as a percentage deduction from portfolio value
                 portfolio_value *= (1 - self.commission)
@@ -83,7 +112,7 @@ class StrategyBacktester:
                     pnl_percentage = (current_price - entry_price) / entry_price
                     trades.append({
                         'entry_date': entry_date,
-                        'exit_date': data.iloc[i]['date'],
+                        'exit_date': data.iloc[i][date_col],
                         'entry_price': entry_price,
                         'exit_price': current_price,
                         'position': 'LONG',
@@ -94,7 +123,7 @@ class StrategyBacktester:
                 
                 # Open short position
                 entry_price = current_price * (1 - self.slippage)
-                entry_date = data.iloc[i]['date']
+                entry_date = data.iloc[i][date_col]
                 position = -1
                 # Apply commission as a percentage deduction from portfolio value
                 portfolio_value *= (1 - self.commission)
@@ -119,7 +148,7 @@ class StrategyBacktester:
             
             trades.append({
                 'entry_date': entry_date,
-                'exit_date': data.iloc[-1]['date'],
+                'exit_date': data.iloc[-1][date_col],
                 'entry_price': entry_price,
                 'exit_price': current_price,
                 'position': 'LONG' if position == 1 else 'SHORT',
@@ -141,20 +170,26 @@ class StrategyBacktester:
         
         return results
     
-    def calculate_metrics(self):
+    def calculate_metrics(self, time_horizon=None):
         """Calculate comprehensive performance metrics"""
         if self.results is None:
             raise ValueError("No backtest results available. Run backtest() first.")
         
         returns = self.results['returns'].dropna()
         portfolio_values = self.results['portfolio_value']
+
+        if time_horizon:
+            annualization_factor = self._get_periods_per_year(time_horizon)
+        else:
+            # Use the one from initialization
+            annualization_factor = self.periods_per_year
         
         # Basic metrics
         total_return = portfolio_values.iloc[-1] - 1 # Since portfolio_values start at 1.0
-        annualized_return = (1 + total_return) ** (252 / len(returns)) - 1
+        annualized_return = (1 + total_return) ** (annualization_factor / len(returns)) - 1 if len(returns) > 0 else 0
         
         # Risk metrics
-        volatility = returns.std() * np.sqrt(252)
+        volatility = returns.std() * np.sqrt(annualization_factor)
         sharpe_ratio = (annualized_return - 0.02) / volatility if volatility > 0 else 0  # Assuming 2% risk-free rate
         
         # Drawdown analysis
@@ -178,7 +213,7 @@ class StrategyBacktester:
             profit_factor = 0
         
         # Additional metrics
-        sortino_ratio = annualized_return / (returns[returns < 0].std() * np.sqrt(252)) if len(returns[returns < 0]) > 0 else 0
+        sortino_ratio = annualized_return / (returns[returns < 0].std() * np.sqrt(annualization_factor)) if len(returns[returns < 0]) > 0 else 0
         calmar_ratio = annualized_return / abs(max_drawdown) if max_drawdown != 0 else 0
         
         metrics = {
@@ -198,17 +233,18 @@ class StrategyBacktester:
         
         return metrics
     
-    def plot_results(self, figsize=(15, 12)):
+    def plot_results(self, figsize=(15, 12), date_col='date'):
         """Create comprehensive performance plots"""
         if self.results is None:
             raise ValueError("No backtest results available. Run backtest() first.")
         
         fig, axes = plt.subplots(2, 2, figsize=figsize)
         fig.suptitle('Strategy Performance Analysis', fontsize=16, fontweight='bold')
+        results_df = self.results.copy()
         
         # 1. Portfolio Value Over Time (now Cumulative Returns)
         ax1 = axes[0, 0]
-        ax1.plot(self.results['date'], self.results['portfolio_value'] * 100, 
+        ax1.plot(results_df[date_col], results_df['portfolio_value'] * 100, 
                 label='Strategy Cumulative Returns', linewidth=2, color='blue')
         ax1.set_title('Cumulative Returns Over Time')
         ax1.set_ylabel('Cumulative Returns (%)')
@@ -217,7 +253,7 @@ class StrategyBacktester:
         
         # 2. Cumulative Returns
         ax2 = axes[0, 1]
-        ax2.plot(self.results['date'], self.results['cumulative_returns'] * 100, 
+        ax2.plot(results_df[date_col], results_df['cumulative_returns'] * 100, 
                 color='green', linewidth=2)
         ax2.set_title('Cumulative Returns')
         ax2.set_ylabel('Cumulative Returns (%)')
@@ -225,11 +261,11 @@ class StrategyBacktester:
         
         # 3. Drawdown
         ax3 = axes[1, 0]
-        returns = self.results['returns'].dropna()
+        returns = results_df['returns'].dropna()
         cumulative_returns = (1 + returns).cumprod()
         rolling_max = cumulative_returns.expanding().max()
         drawdown = (cumulative_returns - rolling_max) / rolling_max * 100
-        ax3.fill_between(range(len(drawdown)), drawdown, 0, 
+        ax3.fill_between(results_df[date_col].iloc[drawdown.index], drawdown, 0, 
                         color='red', alpha=0.3, label='Drawdown')
         ax3.set_title('Drawdown')
         ax3.set_ylabel('Drawdown (%)')
@@ -237,7 +273,7 @@ class StrategyBacktester:
         
         # 4. Monthly Returns Heatmap
         ax4 = axes[1, 1]
-        monthly_returns = self.results.set_index('date')['returns'].resample('M').apply(
+        monthly_returns = results_df.set_index(date_col)['returns'].resample('M').apply(
             lambda x: (1 + x).prod() - 1
         )
         monthly_returns.index = monthly_returns.index.strftime('%Y-%m')
@@ -304,8 +340,9 @@ def run_backtest_example():
     
     # Initialize and run backtester
     backtester = StrategyBacktester(
-        commission=0.001,  # 0.1% commission
-        slippage=0.001     # 0.1% slippage
+        commission=0.001,   # 0.1% commission
+        slippage=0.001,     # 0.1% slippage
+        time_horizon='1d'   # Specify data frequency
     )
     
     # Run backtest
