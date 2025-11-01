@@ -1,5 +1,8 @@
 from setuptools import find_packages, setup
 
+with open("requirements.txt") as f:
+    requirements = f.read().splitlines()
+
 setup(
     name="CoreQuantUtilities",
     version="0.1.0",
@@ -7,10 +10,8 @@ setup(
     description="A core library for quantitative analysis utilities.",
     author="Vipul Tanwar",
     author_email="",
-    url="<your-git-repo-url>",  # Replace with your git repo URL
-    install_requires=[
-        # Dependencies will be read from requirements.txt
-    ],
+    url="https://github.com/your-username/CoreQuantUtilities",  # Replace with your actual git repo URL
+    install_requires=requirements,
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
