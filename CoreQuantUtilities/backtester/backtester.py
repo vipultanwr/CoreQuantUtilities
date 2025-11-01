@@ -7,16 +7,14 @@ import warnings
 warnings.filterwarnings('ignore')
 
 class StrategyBacktester:
-    def __init__(self, initial_capital=100000, commission=0.001, slippage=0.001):
+    def __init__(self, commission=0.001, slippage=0.001):
         """
         Initialize the backtester
         
         Parameters:
-        initial_capital: Starting capital for the strategy
         commission: Commission rate (0.001 = 0.1%)
         slippage: Slippage rate (0.001 = 0.1%)
         """
-        self.initial_capital = initial_capital
         self.commission = commission
         self.slippage = slippage
         self.results = None
@@ -37,14 +35,12 @@ class StrategyBacktester:
         
         # Initialize tracking variables
         position = 0  # Current position: 1=long, -1=short, 0=neutral
-        cash = self.initial_capital
-        portfolio_value = self.initial_capital
+        portfolio_value = 1.0 # Start with 1.0 to represent 100% of initial capital for percentage tracking
         entry_price = 0
         
         # Lists to store results
         portfolio_values = []
         positions = []
-        cash_values = []
         returns = []
         trades = []
         
@@ -52,61 +48,60 @@ class StrategyBacktester:
             current_price = data.iloc[i][price_col]
             signal = data.iloc[i][signal_col]
             
-            # Calculate portfolio value
-            if position == 0:
-                portfolio_value = cash
-            elif position == 1:  # Long position
-                portfolio_value = cash + (current_price - entry_price) * (cash / entry_price)
+            # Calculate portfolio value based on percentage change
+            if position == 1:  # Long position
+                portfolio_value *= (1 + (current_price - entry_price) / entry_price)
             elif position == -1:  # Short position
-                portfolio_value = cash - (current_price - entry_price) * (cash / entry_price)
+                portfolio_value *= (1 + (entry_price - current_price) / entry_price)
             
             # Process signals
             if signal == 1 and position != 1:  # Buy signal
                 if position == -1:  # Close short position
-                    pnl = (entry_price - current_price) * (cash / entry_price)
-                    cash += pnl
+                    # Calculate PnL as a percentage of the capital allocated to the trade
+                    pnl_percentage = (entry_price - current_price) / entry_price
                     trades.append({
                         'entry_date': entry_date,
                         'exit_date': data.iloc[i]['date'],
                         'entry_price': entry_price,
                         'exit_price': current_price,
                         'position': 'SHORT',
-                        'pnl': pnl,
-                        'return': pnl / self.initial_capital
+                        'pnl_percentage': pnl_percentage,
+                        'return': pnl_percentage
                     })
+                    portfolio_value *= (1 + pnl_percentage) # Apply PnL to portfolio
                 
                 # Open long position
                 entry_price = current_price * (1 + self.slippage)
                 entry_date = data.iloc[i]['date']
                 position = 1
-                # Apply commission
-                cash *= (1 - self.commission)
+                # Apply commission as a percentage deduction from portfolio value
+                portfolio_value *= (1 - self.commission)
                 
             elif signal == -1 and position != -1:  # Sell signal
                 if position == 1:  # Close long position
-                    pnl = (current_price - entry_price) * (cash / entry_price)
-                    cash += pnl
+                    # Calculate PnL as a percentage of the capital allocated to the trade
+                    pnl_percentage = (current_price - entry_price) / entry_price
                     trades.append({
                         'entry_date': entry_date,
                         'exit_date': data.iloc[i]['date'],
                         'entry_price': entry_price,
                         'exit_price': current_price,
                         'position': 'LONG',
-                        'pnl': pnl,
-                        'return': pnl / self.initial_capital
+                        'pnl_percentage': pnl_percentage,
+                        'return': pnl_percentage
                     })
+                    portfolio_value *= (1 + pnl_percentage) # Apply PnL to portfolio
                 
                 # Open short position
                 entry_price = current_price * (1 - self.slippage)
                 entry_date = data.iloc[i]['date']
                 position = -1
-                # Apply commission
-                cash *= (1 - self.commission)
+                # Apply commission as a percentage deduction from portfolio value
+                portfolio_value *= (1 - self.commission)
             
             # Store values
             portfolio_values.append(portfolio_value)
             positions.append(position)
-            cash_values.append(cash)
             
             # Calculate returns
             if i == 0:
@@ -118,26 +113,25 @@ class StrategyBacktester:
         if position != 0:
             current_price = data.iloc[-1][price_col]
             if position == 1:
-                pnl = (current_price - entry_price) * (cash / entry_price)
+                pnl_percentage = (current_price - entry_price) / entry_price
             else:
-                pnl = (entry_price - current_price) * (cash / entry_price)
+                pnl_percentage = (entry_price - current_price) / entry_price
             
-            cash += pnl
             trades.append({
                 'entry_date': entry_date,
                 'exit_date': data.iloc[-1]['date'],
                 'entry_price': entry_price,
                 'exit_price': current_price,
                 'position': 'LONG' if position == 1 else 'SHORT',
-                'pnl': pnl,
-                'return': pnl / self.initial_capital
+                'pnl_percentage': pnl_percentage,
+                'return': pnl_percentage
             })
+            portfolio_value *= (1 + pnl_percentage) # Apply PnL to portfolio
         
         # Create results DataFrame
         results = data.copy()
         results['portfolio_value'] = portfolio_values
         results['position'] = positions
-        results['cash'] = cash_values
         results['returns'] = returns
         results['cumulative_returns'] = (1 + pd.Series(returns)).cumprod() - 1
         
@@ -156,7 +150,7 @@ class StrategyBacktester:
         portfolio_values = self.results['portfolio_value']
         
         # Basic metrics
-        total_return = (portfolio_values.iloc[-1] - self.initial_capital) / self.initial_capital
+        total_return = portfolio_values.iloc[-1] - 1 # Since portfolio_values start at 1.0
         annualized_return = (1 + total_return) ** (252 / len(returns)) - 1
         
         # Risk metrics
@@ -171,16 +165,16 @@ class StrategyBacktester:
         
         # Win/Loss analysis
         if len(self.trades) > 0:
-            winning_trades = self.trades[self.trades['pnl'] > 0]
-            losing_trades = self.trades[self.trades['pnl'] < 0]
+            winning_trades = self.trades[self.trades['pnl_percentage'] > 0]
+            losing_trades = self.trades[self.trades['pnl_percentage'] < 0]
             win_rate = len(winning_trades) / len(self.trades) if len(self.trades) > 0 else 0
-            avg_win = winning_trades['pnl'].mean() if len(winning_trades) > 0 else 0
-            avg_loss = losing_trades['pnl'].mean() if len(losing_trades) > 0 else 0
-            profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+            avg_win_percentage = winning_trades['pnl_percentage'].mean() if len(winning_trades) > 0 else 0
+            avg_loss_percentage = losing_trades['pnl_percentage'].mean() if len(losing_trades) > 0 else 0
+            profit_factor = abs(avg_win_percentage / avg_loss_percentage) if avg_loss_percentage != 0 else 0
         else:
             win_rate = 0
-            avg_win = 0
-            avg_loss = 0
+            avg_win_percentage = 0
+            avg_loss_percentage = 0
             profit_factor = 0
         
         # Additional metrics
@@ -198,9 +192,8 @@ class StrategyBacktester:
             'Win Rate': f"{win_rate:.2%}",
             'Total Trades': len(self.trades),
             'Profit Factor': f"{profit_factor:.2f}",
-            'Average Win': f"${avg_win:.2f}",
-            'Average Loss': f"${avg_loss:.2f}",
-            'Final Portfolio Value': f"${portfolio_values.iloc[-1]:.2f}"
+            'Average Win Percentage': f"{avg_win_percentage:.2%}",
+            'Average Loss Percentage': f"{avg_loss_percentage:.2%}"
         }
         
         return metrics
@@ -213,14 +206,12 @@ class StrategyBacktester:
         fig, axes = plt.subplots(2, 2, figsize=figsize)
         fig.suptitle('Strategy Performance Analysis', fontsize=16, fontweight='bold')
         
-        # 1. Portfolio Value Over Time
+        # 1. Portfolio Value Over Time (now Cumulative Returns)
         ax1 = axes[0, 0]
-        ax1.plot(self.results['date'], self.results['portfolio_value'], 
-                label='Strategy', linewidth=2, color='blue')
-        ax1.plot(self.results['date'], [self.initial_capital] * len(self.results), 
-                label='Initial Capital', linestyle='--', color='red', alpha=0.7)
-        ax1.set_title('Portfolio Value Over Time')
-        ax1.set_ylabel('Portfolio Value ($)')
+        ax1.plot(self.results['date'], self.results['portfolio_value'] * 100, 
+                label='Strategy Cumulative Returns', linewidth=2, color='blue')
+        ax1.set_title('Cumulative Returns Over Time')
+        ax1.set_ylabel('Cumulative Returns (%)')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
@@ -313,7 +304,6 @@ def run_backtest_example():
     
     # Initialize and run backtester
     backtester = StrategyBacktester(
-        initial_capital=100000,
         commission=0.001,  # 0.1% commission
         slippage=0.001     # 0.1% slippage
     )
