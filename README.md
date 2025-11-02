@@ -1,18 +1,25 @@
 # CoreQuantUtilities
 
-A core library for quantitative analysis utilities.
+A Python library for quantitative analysis, featuring a powerful event-driven backtesting engine and a comprehensive technical analysis signal generator.
 
 ## Installation
 
-You can install CoreQuantUtilities directly from the Git repository:
+First, ensure you have the TA-Lib dependency installed.
+
+**On macOS:**
+```bash
+brew install ta-lib
+```
+
+Then, you can install CoreQuantUtilities directly from the Git repository:
 
 ```bash
-pip install git+https://github.com/your-username/CoreQuantUtilities.git
+pip install git+https://github.com/vipultanwr/CoreQuantUtilities.git
 ```
 
 ## Usage
 
-(Add usage examples here)
+(Will add usage examples here soon)
 
 ## License
 

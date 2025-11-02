@@ -10,7 +10,7 @@ setup(
     description="A core library for quantitative analysis utilities.",
     author="Vipul Tanwar",
     author_email="",
-    url="https://github.com/your-username/CoreQuantUtilities",  # Replace with your actual git repo URL
+    url="https://github.com/vipultanwr/CoreQuantUtilities",  # Assuming this is your repo URL
     install_requires=requirements,
     classifiers=[
         "Programming Language :: Python :: 3",

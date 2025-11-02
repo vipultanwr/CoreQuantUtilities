@@ -1,6 +1,5 @@
-numpy
 pandas
+numpy
 TA-Lib
+backtrader
 matplotlib
-seaborn
-scipy

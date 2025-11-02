@@ -1,33 +1,102 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Nov 2 21:27:21 2025
+
+@author: Vipul Tanwar
+
+A Backtrader-based backtesting engine that mirrors the interface of the custom backtester.
+"""
+
+import backtrader as bt
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy import stats
 import warnings
+
 warnings.filterwarnings('ignore')
 
+class PandasDataWithSignal(bt.feeds.PandasData):
+    """
+    Custom data feed that includes a 'signal' line from the DataFrame.
+    """
+    lines = ('signal',)
+    # Map the 'signal' line to a column in the DataFrame.
+    # -1 indicates the last column, but we will pass the column name via params.
+    params = (('signal', 'signal'),)
+
+class SignalStrategy(bt.Strategy):
+    """
+    A generic strategy that trades based on an external signal column.
+    Signal: 1 for Buy, -1 for Sell, 0 for Hold.
+    """
+    params = (
+        ('holding_period', 1), # Default holding period of 1 bar (trade on next bar)
+    )
+
+    def __init__(self):
+        self.signal = self.datas[0].lines.signal
+        self.order = None
+        self.entry_bar = 0 # Bar number of the last position entry
+
+    def notify_order(self, order):
+        # Check if an order has been completed
+        # Attention: broker could reject order if not enough cash
+        if order.status in [order.Completed, order.Canceled, order.Margin]:
+            self.order = None # Reset order status so we can place another one
+
+    def next(self):
+        # Check if an order is pending ... if so, we cannot send a 2nd one
+        if self.order:
+            return
+
+        # Check if we are in a position and if the holding period has passed
+        if self.position and (len(self) < self.entry_bar + self.p.holding_period):
+            return # Still in holding period, do nothing
+        if self.order:
+            return
+
+        current_signal = self.signal[0]
+
+        if current_signal == 1:  # Buy Signal
+            # If we are not in a long position, buy.
+            # This will also close a short position and open a long one.
+            if self.position.size <= 0:
+                self.entry_bar = len(self) # Record entry bar
+                self.order = self.buy()
+
+        elif current_signal == -1:  # Sell Signal
+            # If we are not in a short position, sell.
+            # This will also close a long position and open a short one.
+            if self.position.size >= 0:
+                self.entry_bar = len(self) # Record entry bar
+                self.order = self.sell()
+
 class StrategyBacktester:
-    def __init__(self, commission=0.001, slippage=0.001, time_horizon='1d'):
+    def __init__(self, commission=0.001, slippage=0.001, time_horizon='1d', initial_cash=100000.0, holding_period=1, sizing_percent=98):
         """
-        Initialize the backtester
-        
+        Initialize the backtrader wrapper.
+
         Parameters:
-        commission: Commission rate (0.001 = 0.1%)
-        slippage: Slippage rate (0.001 = 0.1%)
-        time_horizon: The data frequency for annualization.
-                      Supported values: '1m', '5m', '15m', '30m', '1h', '1d', '1w', '1mo'.
+        commission (float): Commission rate for trades (e.g., 0.001 for 0.1%).
+        slippage (float): Slippage per trade (e.g., 0.001 for 0.1%).
+        time_horizon (str): The data frequency for annualization.
+        initial_cash (float): Starting portfolio value.
+        holding_period (int): Minimum number of bars to hold a position.
+        sizing_percent (int): Percentage of portfolio to use for trades (e.g., 98 for 98%).
         """
         self.commission = commission
         self.slippage = slippage
         self.time_horizon = time_horizon
-        self.periods_per_year = self._get_periods_per_year(time_horizon)
+        self.holding_period = holding_period
+        self.sizing_percent = sizing_percent
+        self.initial_cash = initial_cash
         self.results = None
-        self.trades = []
-        
+        self.cerebro = None
+        self.run_info = None
+
     def _get_periods_per_year(self, time_horizon):
         """Maps time horizon string to periods per year."""
         TRADING_DAYS_PER_YEAR = 252
-        TRADING_HOURS_PER_DAY = 6.5  # For US equities; adjust for other markets
+        TRADING_HOURS_PER_DAY = 6.5
 
         horizon_map = {
             '1m': TRADING_DAYS_PER_YEAR * TRADING_HOURS_PER_DAY * 60,
@@ -39,322 +108,175 @@ class StrategyBacktester:
             '1w': 52,
             '1mo': 12,
         }
-        if time_horizon not in horizon_map:
-            raise ValueError(f"Unsupported time_horizon: '{time_horizon}'. Supported values are {list(horizon_map.keys())}")
-        return horizon_map[time_horizon]
-        
+        return horizon_map.get(time_horizon, TRADING_DAYS_PER_YEAR)
+
     def backtest(self, df, price_col='close', signal_col='Signals', date_col='date'):
         """
-        Run the backtest on the provided DataFrame
-        
+        Run the backtest using backtrader.
+
         Parameters:
-        df: DataFrame with OHLCV data and signals
-        price_col: Column name for price data
-        signal_col: Column name for signals (1=buy, -1=sell, 0=hold)
-        date_col: Column name for date/datetime data
+        df (pd.DataFrame): DataFrame with OHLCV data and signals.
+        price_col (str): Not used by backtrader directly, but kept for interface consistency.
+        signal_col (str): Column name for signals (1=buy, -1=sell, 0=hold).
+        date_col (str): Column name for date/datetime data.
         """
-        # Make a copy to avoid modifying original data
-        data = df.copy()        
-        # Normalize column names to lowercase for consistency
+        data = df.copy()
         data.columns = [col.lower() for col in data.columns]
-        price_col = price_col.lower()
         signal_col = signal_col.lower()
         date_col = date_col.lower()
-        data = data.sort_values(date_col).reset_index(drop=True)
-        
-        # Initialize tracking variables
-        position = 0  # Current position: 1=long, -1=short, 0=neutral
-        portfolio_value = 1.0 # Start with 1.0 to represent 100% of initial capital for percentage tracking
-        entry_price = 0
-        
-        # Lists to store results
-        portfolio_values = []
-        positions = []
-        returns = []
-        trades = []
-        
-        for i in range(len(data)):
-            current_price = data.iloc[i][price_col]
-            signal = data.iloc[i][signal_col]
-            
-            # Calculate portfolio value based on percentage change
-            if position == 1:  # Long position
-                portfolio_value *= (1 + (current_price - entry_price) / entry_price)
-            elif position == -1:  # Short position
-                portfolio_value *= (1 + (entry_price - current_price) / entry_price)
-            
-            # Process signals
-            if signal == 1 and position != 1:  # Buy signal
-                if position == -1:  # Close short position
-                    # Calculate PnL as a percentage of the capital allocated to the trade
-                    pnl_percentage = (entry_price - current_price) / entry_price
-                    trades.append({
-                        'entry_date': entry_date,
-                        'exit_date': data.iloc[i][date_col],
-                        'entry_price': entry_price,
-                        'exit_price': current_price,
-                        'position': 'SHORT',
-                        'pnl_percentage': pnl_percentage,
-                        'return': pnl_percentage
-                    })
-                    portfolio_value *= (1 + pnl_percentage) # Apply PnL to portfolio
-                
-                # Open long position
-                entry_price = current_price * (1 + self.slippage)
-                entry_date = data.iloc[i][date_col]
-                position = 1
-                # Apply commission as a percentage deduction from portfolio value
-                portfolio_value *= (1 - self.commission)
-                
-            elif signal == -1 and position != -1:  # Sell signal
-                if position == 1:  # Close long position
-                    # Calculate PnL as a percentage of the capital allocated to the trade
-                    pnl_percentage = (current_price - entry_price) / entry_price
-                    trades.append({
-                        'entry_date': entry_date,
-                        'exit_date': data.iloc[i][date_col],
-                        'entry_price': entry_price,
-                        'exit_price': current_price,
-                        'position': 'LONG',
-                        'pnl_percentage': pnl_percentage,
-                        'return': pnl_percentage
-                    })
-                    portfolio_value *= (1 + pnl_percentage) # Apply PnL to portfolio
-                
-                # Open short position
-                entry_price = current_price * (1 - self.slippage)
-                entry_date = data.iloc[i][date_col]
-                position = -1
-                # Apply commission as a percentage deduction from portfolio value
-                portfolio_value *= (1 - self.commission)
-            
-            # Store values
-            portfolio_values.append(portfolio_value)
-            positions.append(position)
-            
-            # Calculate returns
-            if i == 0:
-                returns.append(0)
-            else:
-                returns.append((portfolio_value - portfolio_values[i-1]) / portfolio_values[i-1])
-        
-        # Close any remaining position
-        if position != 0:
-            current_price = data.iloc[-1][price_col]
-            if position == 1:
-                pnl_percentage = (current_price - entry_price) / entry_price
-            else:
-                pnl_percentage = (entry_price - current_price) / entry_price
-            
-            trades.append({
-                'entry_date': entry_date,
-                'exit_date': data.iloc[-1][date_col],
-                'entry_price': entry_price,
-                'exit_price': current_price,
-                'position': 'LONG' if position == 1 else 'SHORT',
-                'pnl_percentage': pnl_percentage,
-                'return': pnl_percentage
-            })
-            portfolio_value *= (1 + pnl_percentage) # Apply PnL to portfolio
-        
-        # Create results DataFrame
-        results = data.copy()
-        results['portfolio_value'] = portfolio_values
-        results['position'] = positions
-        results['returns'] = returns
-        results['cumulative_returns'] = (1 + pd.Series(returns)).cumprod() - 1
-        
-        # Store results
-        self.results = results
-        self.trades = pd.DataFrame(trades)
-        
-        return results
-    
-    def calculate_metrics(self, time_horizon=None):
-        """Calculate comprehensive performance metrics"""
-        if self.results is None:
-            raise ValueError("No backtest results available. Run backtest() first.")
-        
-        returns = self.results['returns'].dropna()
-        portfolio_values = self.results['portfolio_value']
 
-        if time_horizon:
-            annualization_factor = self._get_periods_per_year(time_horizon)
+        # Prepare data for backtrader
+        data[date_col] = pd.to_datetime(data[date_col])
+        data = data.set_index(date_col)
+
+        # Ensure required columns exist
+        required_cols = ['open', 'high', 'low', 'close', 'volume', signal_col]
+        for col in required_cols:
+            if col not in data.columns:
+                raise ValueError(f"Input DataFrame must contain column: {col}")
+
+        # Create a cerebro instance
+        self.cerebro = bt.Cerebro()
+
+        # Add data feed
+        # Use the custom data feed and map the signal_col to its 'signal' line
+        data_feed = PandasDataWithSignal(dataname=data, datetime=None, signal=signal_col)
+        self.cerebro.adddata(data_feed)
+
+        # Add strategy
+        # The strategy now knows to look for the 'signal' line, so no param is needed.
+        self.cerebro.addstrategy(SignalStrategy, holding_period=self.holding_period)
+
+        # Set initial capital and broker settings
+        self.cerebro.broker.setcash(self.initial_cash)
+        self.cerebro.broker.setcommission(commission=self.commission)
+        # Backtrader's slippage is % based, so 0.1% is 0.1
+        self.cerebro.broker.set_slippage_perc(perc=self.slippage * 100)
+        self.cerebro.addsizer(bt.sizers.AllInSizer, percents=self.sizing_percent)
+
+        # Add analyzers
+        self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', timeframe=bt.TimeFrame.Days, compression=1, factor=self._get_periods_per_year(self.time_horizon), annualize=True)
+        self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns', timeframe=bt.TimeFrame.Days)
+        self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
+        self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='tradeanalyzer')
+
+        # Only add PyFolio analyzer if there are potential trades to avoid errors on no-trade backtests
+        has_trading_signals = (data[signal_col] != 0).any()
+        if has_trading_signals:
+            self.cerebro.addanalyzer(bt.analyzers.PyFolio, _name='pyfolio')
+
+        # Run the backtest
+        self.run_info = self.cerebro.run()
+        
+        # Extract results for compatibility, handling the case where PyFolio was not added
+        if has_trading_signals:
+            pyfolio_analyzer = self.run_info[0].analyzers.getbyname('pyfolio')
+            returns, positions, transactions, gross_lev = pyfolio_analyzer.get_pf_items()
         else:
-            # Use the one from initialization
-            annualization_factor = self.periods_per_year
+            # Create empty structures if no trades were possible
+            returns = pd.Series(0.0, index=data.index)
+            positions = pd.DataFrame(columns=['amount', 'value'])
+            transactions = pd.DataFrame(columns=['amount', 'price', 'symbol', 'value'])
+
+        self.results = pd.DataFrame(index=returns.index)
+        self.results['returns'] = returns
+        self.results['portfolio_value'] = (1 + returns).cumprod() * self.initial_cash
+        self.results['cumulative_returns'] = self.results['portfolio_value'] / self.initial_cash - 1
         
-        # Basic metrics
-        total_return = portfolio_values.iloc[-1] - 1 # Since portfolio_values start at 1.0
-        annualized_return = (1 + total_return) ** (annualization_factor / len(returns)) - 1 if len(returns) > 0 else 0
-        
-        # Risk metrics
-        volatility = returns.std() * np.sqrt(annualization_factor)
-        sharpe_ratio = (annualized_return - 0.02) / volatility if volatility > 0 else 0  # Assuming 2% risk-free rate
-        
-        # Drawdown analysis
-        cumulative_returns = (1 + returns).cumprod()
-        rolling_max = cumulative_returns.expanding().max()
-        drawdown = (cumulative_returns - rolling_max) / rolling_max
-        max_drawdown = drawdown.min()
-        
-        # Win/Loss analysis
-        if len(self.trades) > 0:
-            winning_trades = self.trades[self.trades['pnl_percentage'] > 0]
-            losing_trades = self.trades[self.trades['pnl_percentage'] < 0]
-            win_rate = len(winning_trades) / len(self.trades) if len(self.trades) > 0 else 0
-            avg_win_percentage = winning_trades['pnl_percentage'].mean() if len(winning_trades) > 0 else 0
-            avg_loss_percentage = losing_trades['pnl_percentage'].mean() if len(losing_trades) > 0 else 0
-            profit_factor = abs(avg_win_percentage / avg_loss_percentage) if avg_loss_percentage != 0 else 0
+        # Check if positions DataFrame is not empty AND has the 'amount' column
+        if not positions.empty and 'amount' in positions.columns:
+            self.results['position'] = positions['amount'].reindex(self.results.index, fill_value=0)
         else:
-            win_rate = 0
-            avg_win_percentage = 0
-            avg_loss_percentage = 0
-            profit_factor = 0
+            self.results['position'] = 0
         
-        # Additional metrics
-        sortino_ratio = annualized_return / (returns[returns < 0].std() * np.sqrt(annualization_factor)) if len(returns[returns < 0]) > 0 else 0
-        calmar_ratio = annualized_return / abs(max_drawdown) if max_drawdown != 0 else 0
+        self.trades = transactions
+
+        return self.results
+
+    def calculate_metrics(self):
+        """Calculate comprehensive performance metrics from backtrader analyzers."""
+        if not self.run_info:
+            raise ValueError("No backtest results available. Run backtest() first.")
+
+        analyzers = self.run_info[0].analyzers
+        trade_analyzer = analyzers.tradeanalyzer.get_analysis()
         
+        total_return = (self.cerebro.broker.getvalue() / self.initial_cash) - 1
+        
+        win_rate = trade_analyzer.won.total / trade_analyzer.total.total if 'won' in trade_analyzer and trade_analyzer.total.total > 0 else 0
+        avg_win = trade_analyzer.won.pnl.average if 'won' in trade_analyzer and trade_analyzer.won.total > 0 else 0
+        avg_loss = trade_analyzer.lost.pnl.average if 'lost' in trade_analyzer and trade_analyzer.lost.total > 0 else 0
+        profit_factor = abs(trade_analyzer.won.pnl.total / trade_analyzer.lost.pnl.total) if 'won' in trade_analyzer and 'lost' in trade_analyzer and trade_analyzer.lost.pnl.total != 0 else float('inf')
+
         metrics = {
             'Total Return': f"{total_return:.2%}",
-            'Annualized Return': f"{annualized_return:.2%}",
-            'Volatility': f"{volatility:.2%}",
-            'Sharpe Ratio': f"{sharpe_ratio:.2f}",
-            'Sortino Ratio': f"{sortino_ratio:.2f}",
-            'Calmar Ratio': f"{calmar_ratio:.2f}",
-            'Maximum Drawdown': f"{max_drawdown:.2%}",
+            'Annualized Return': f"{analyzers.returns.get_analysis()['rnorm100']:.2%}",
+            'Volatility': "N/A in bt", # PyFolio can calculate this
+            'Sharpe Ratio': f"{analyzers.sharpe.get_analysis().get('sharperatio', 0):.2f}",
+            'Sortino Ratio': "N/A in bt", # PyFolio can calculate this
+            'Calmar Ratio': "N/A in bt", # PyFolio can calculate this
+            'Maximum Drawdown': f"{analyzers.drawdown.get_analysis().max.drawdown:.2%}",
             'Win Rate': f"{win_rate:.2%}",
-            'Total Trades': len(self.trades),
+            'Total Trades': trade_analyzer.total.total,
             'Profit Factor': f"{profit_factor:.2f}",
-            'Average Win Percentage': f"{avg_win_percentage:.2%}",
-            'Average Loss Percentage': f"{avg_loss_percentage:.2%}"
+            'Average Win': f"{avg_win:.2f}",
+            'Average Loss': f"{avg_loss:.2f}"
         }
-        
         return metrics
-    
-    def plot_results(self, figsize=(15, 12), date_col='date'):
-        """Create comprehensive performance plots"""
-        if self.results is None:
+
+    def plot_results(self, **kwargs):
+        """Plot results using backtrader's plotting feature."""
+        if not self.cerebro:
             raise ValueError("No backtest results available. Run backtest() first.")
         
-        fig, axes = plt.subplots(2, 2, figsize=figsize)
-        fig.suptitle('Strategy Performance Analysis', fontsize=16, fontweight='bold')
-        results_df = self.results.copy()
-        
-        # 1. Portfolio Value Over Time (now Cumulative Returns)
-        ax1 = axes[0, 0]
-        ax1.plot(results_df[date_col], results_df['portfolio_value'] * 100, 
-                label='Strategy Cumulative Returns', linewidth=2, color='blue')
-        ax1.set_title('Cumulative Returns Over Time')
-        ax1.set_ylabel('Cumulative Returns (%)')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # 2. Cumulative Returns
-        ax2 = axes[0, 1]
-        ax2.plot(results_df[date_col], results_df['cumulative_returns'] * 100, 
-                color='green', linewidth=2)
-        ax2.set_title('Cumulative Returns')
-        ax2.set_ylabel('Cumulative Returns (%)')
-        ax2.grid(True, alpha=0.3)
-        
-        # 3. Drawdown
-        ax3 = axes[1, 0]
-        returns = results_df['returns'].dropna()
-        cumulative_returns = (1 + returns).cumprod()
-        rolling_max = cumulative_returns.expanding().max()
-        drawdown = (cumulative_returns - rolling_max) / rolling_max * 100
-        ax3.fill_between(results_df[date_col].iloc[drawdown.index], drawdown, 0, 
-                        color='red', alpha=0.3, label='Drawdown')
-        ax3.set_title('Drawdown')
-        ax3.set_ylabel('Drawdown (%)')
-        ax3.grid(True, alpha=0.3)
-        
-        # 4. Monthly Returns Heatmap
-        ax4 = axes[1, 1]
-        monthly_returns = results_df.set_index(date_col)['returns'].resample('M').apply(
-            lambda x: (1 + x).prod() - 1
-        )
-        monthly_returns.index = monthly_returns.index.strftime('%Y-%m')
-        
-        if len(monthly_returns) > 1:
-            # Create a simple bar chart for monthly returns
-            ax4.bar(range(len(monthly_returns)), monthly_returns * 100, 
-                   color=['green' if x > 0 else 'red' for x in monthly_returns])
-            ax4.set_title('Monthly Returns')
-            ax4.set_ylabel('Monthly Return (%)')
-            ax4.set_xticks(range(0, len(monthly_returns), max(1, len(monthly_returns)//10)))
-            ax4.set_xticklabels([monthly_returns.index[i] for i in range(0, len(monthly_returns), max(1, len(monthly_returns)//10))], 
-                               rotation=45)
-        else:
-            ax4.text(0.5, 0.5, 'Insufficient data\nfor monthly analysis', 
-                    ha='center', va='center', transform=ax4.transAxes)
-            ax4.set_title('Monthly Returns')
-        
-        plt.tight_layout()
-        plt.show()
-    
+        if self.trades.empty:
+            print("\nPlotting skipped: No trades were executed during the backtest.")
+            return
+        self.cerebro.plot(**kwargs)
+
     def print_metrics(self):
-        """Print performance metrics in a formatted table"""
+        """Print performance metrics in a formatted table."""
         metrics = self.calculate_metrics()
         
         print("\n" + "="*50)
-        print("STRATEGY PERFORMANCE METRICS")
+        print("BACKTRADER STRATEGY PERFORMANCE METRICS")
         print("="*50)
         
         for key, value in metrics.items():
             print(f"{key:<25}: {value}")
         
         print("\n" + "="*50)
-        
-        if len(self.trades) > 0:
-            print("RECENT TRADES:")
-            print("-"*50)
-            print(self.trades.tail().to_string(index=False))
-        
-        return metrics
 
-# Example usage with your data
+
+# Example usage
 def run_backtest_example():
-    """
-    Example of how to use the backtester with your data
-    """
-    # Sample data (replace with your actual DataFrame)
+    """Example of how to use the BacktraderWrapper."""
     np.random.seed(42)
     dates = pd.date_range('2020-01-01', '2023-12-31', freq='D')
     n = len(dates)
     
-    # Create sample OHLCV data
-    close_prices = 100 + np.cumsum(np.random.randn(n) * 0.02)
+    close_prices = 100 + np.cumsum(np.random.randn(n) * 0.5)
     
     sample_data = pd.DataFrame({
         'date': dates,
-        'open': close_prices + np.random.randn(n) * 0.5,
-        'high': close_prices + np.abs(np.random.randn(n) * 1.5),
-        'low': close_prices - np.abs(np.random.randn(n) * 1.5),
+        'open': close_prices - np.random.randn(n) * 0.25,
+        'high': close_prices + np.abs(np.random.randn(n) * 0.5),
+        'low': close_prices - np.abs(np.random.randn(n) * 0.5),
         'close': close_prices,
-        'volume': np.random.randint(1000, 10000, n),
-        'Signals': np.random.choice([-1, 0, 1], n, p=[0.1, 0.8, 0.1])  # 10% buy, 10% sell, 80% hold
+        'volume': np.random.randint(100000, 500000, n),
+        'Signals': np.random.choice([-1, 0, 1], n, p=[0.1, 0.8, 0.1])
     })
     
-    # Initialize and run backtester
-    backtester = StrategyBacktester(
-        commission=0.001,   # 0.1% commission
-        slippage=0.001,     # 0.1% slippage
-        time_horizon='1d'   # Specify data frequency
+    bt_backtester = StrategyBacktester(
+        commission=0.001,
+        slippage=0.001,
+        time_horizon='1d'
     )
     
-    # Run backtest
-    results = backtester.backtest(sample_data, price_col='close', signal_col='Signals')
+    results = bt_backtester.backtest(sample_data, signal_col='Signals')
     
-    # Print metrics
-    backtester.print_metrics()
-    
-    # Plot results
-    backtester.plot_results()
-    
-    return backtester
+    bt_backtester.print_metrics()
+    bt_backtester.plot_results(style='candlestick')
 
-# Uncomment the line below to run the example
-# backtester = run_backtest_example()
+if __name__ == '__main__':
+    run_backtest_example()
