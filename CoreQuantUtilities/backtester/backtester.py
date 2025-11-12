@@ -156,7 +156,7 @@ class StrategyBacktester:
 
         # Add analyzers
         self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', timeframe=bt.TimeFrame.Days, compression=1, factor=self._get_periods_per_year(self.time_horizon), annualize=True)
-        self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns', timeframe=bt.TimeFrame.Days)
+        self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns', timeframe=bt.TimeFrame.NoTimeFrame)
         self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
         self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='tradeanalyzer')
 
@@ -201,7 +201,11 @@ class StrategyBacktester:
         analyzers = self.run_info[0].analyzers
         trade_analyzer = analyzers.tradeanalyzer.get_analysis()
         
+        periods_per_year = self._get_periods_per_year(self.time_horizon)
+        
         total_return = (self.cerebro.broker.getvalue() / self.initial_cash) - 1
+        # Manually calculate annualized return for the given time horizon
+        annualized_return = (1 + total_return) ** (periods_per_year / len(self.results)) - 1 if len(self.results) > 0 else 0
         
         win_rate = trade_analyzer.won.total / trade_analyzer.total.total if 'won' in trade_analyzer and trade_analyzer.total.total > 0 else 0
         avg_win = trade_analyzer.won.pnl.average if 'won' in trade_analyzer and trade_analyzer.won.total > 0 else 0
@@ -210,12 +214,12 @@ class StrategyBacktester:
 
         metrics = {
             'Total Return': f"{total_return:.2%}",
-            'Annualized Return': f"{analyzers.returns.get_analysis()['rnorm100']:.2%}",
+            'Annualized Return': f"{annualized_return:.2%}",
             'Volatility': "N/A in bt", # PyFolio can calculate this
             'Sharpe Ratio': f"{analyzers.sharpe.get_analysis().get('sharperatio', 0):.2f}",
             'Sortino Ratio': "N/A in bt", # PyFolio can calculate this
             'Calmar Ratio': "N/A in bt", # PyFolio can calculate this
-            'Maximum Drawdown': f"{analyzers.drawdown.get_analysis().max.drawdown:.2%}",
+            'Maximum Drawdown': f"{analyzers.drawdown.get_analysis().max.drawdown / 100:.2%}",
             'Win Rate': f"{win_rate:.2%}",
             'Total Trades': trade_analyzer.total.total,
             'Profit Factor': f"{profit_factor:.2f}",
