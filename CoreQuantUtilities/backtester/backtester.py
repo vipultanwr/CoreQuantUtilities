@@ -201,11 +201,21 @@ class StrategyBacktester:
         analyzers = self.run_info[0].analyzers
         trade_analyzer = analyzers.tradeanalyzer.get_analysis()
         
-        periods_per_year = self._get_periods_per_year(self.time_horizon)
+        # More robust annualization factor calculation
+        if len(self.results.index) > 1:
+            # Calculate the total time span of the backtest in days
+            time_span_days = (self.results.index[-1] - self.results.index[0]).days
+            # Avoid division by zero for single-day backtests
+            if time_span_days == 0:
+                time_span_years = 1 / 365.25
+            else:
+                time_span_years = time_span_days / 365.25
+        else:
+            time_span_years = 0
         
         total_return = (self.cerebro.broker.getvalue() / self.initial_cash) - 1
-        # Manually calculate annualized return for the given time horizon
-        annualized_return = (1 + total_return) ** (periods_per_year / len(self.results)) - 1 if len(self.results) > 0 else 0
+        # Adjust annualized return calculation to use the total time span
+        annualized_return = (1 + total_return) ** (1 / time_span_years) - 1 if time_span_years > 0 else 0
         
         win_rate = trade_analyzer.won.total / trade_analyzer.total.total if 'won' in trade_analyzer and trade_analyzer.total.total > 0 else 0
         avg_win = trade_analyzer.won.pnl.average if 'won' in trade_analyzer and trade_analyzer.won.total > 0 else 0
