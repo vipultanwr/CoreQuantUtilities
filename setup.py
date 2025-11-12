@@ -5,7 +5,7 @@ with open("requirements.txt") as f:
 
 setup(
     name="CoreQuantUtilities",
-    version="1.1.0",
+    version="1.2.0",
     packages=find_packages(),
     description="A core library for quantitative analysis utilities.",
     author="Vipul Tanwar",
