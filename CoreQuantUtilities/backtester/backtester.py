@@ -156,7 +156,7 @@ class StrategyBacktester:
 
         # Add analyzers
         self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', timeframe=bt.TimeFrame.Days, compression=1, factor=self._get_periods_per_year(self.time_horizon), annualize=True)
-        self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns', timeframe=bt.TimeFrame.Days)
+        self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns', timeframe=bt.TimeFrame.NoTimeFrame)
         self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
         self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='tradeanalyzer')
 
@@ -201,7 +201,21 @@ class StrategyBacktester:
         analyzers = self.run_info[0].analyzers
         trade_analyzer = analyzers.tradeanalyzer.get_analysis()
         
+        # More robust annualization factor calculation
+        if len(self.results.index) > 1:
+            # Calculate the total time span of the backtest in days
+            time_span_days = (self.results.index[-1] - self.results.index[0]).days
+            # Avoid division by zero for single-day backtests
+            if time_span_days == 0:
+                time_span_years = 1 / 365.25
+            else:
+                time_span_years = time_span_days / 365.25
+        else:
+            time_span_years = 0
+        
         total_return = (self.cerebro.broker.getvalue() / self.initial_cash) - 1
+        # Adjust annualized return calculation to use the total time span
+        annualized_return = (1 + total_return) ** (1 / time_span_years) - 1 if time_span_years > 0 else 0
         
         win_rate = trade_analyzer.won.total / trade_analyzer.total.total if 'won' in trade_analyzer and trade_analyzer.total.total > 0 else 0
         avg_win = trade_analyzer.won.pnl.average if 'won' in trade_analyzer and trade_analyzer.won.total > 0 else 0
@@ -210,12 +224,12 @@ class StrategyBacktester:
 
         metrics = {
             'Total Return': f"{total_return:.2%}",
-            'Annualized Return': f"{analyzers.returns.get_analysis()['rnorm100']:.2%}",
+            'Annualized Return': f"{annualized_return:.2%}",
             'Volatility': "N/A in bt", # PyFolio can calculate this
             'Sharpe Ratio': f"{analyzers.sharpe.get_analysis().get('sharperatio', 0):.2f}",
             'Sortino Ratio': "N/A in bt", # PyFolio can calculate this
             'Calmar Ratio': "N/A in bt", # PyFolio can calculate this
-            'Maximum Drawdown': f"{analyzers.drawdown.get_analysis().max.drawdown:.2%}",
+            'Maximum Drawdown': f"{analyzers.drawdown.get_analysis().max.drawdown / 100:.2%}",
             'Win Rate': f"{win_rate:.2%}",
             'Total Trades': trade_analyzer.total.total,
             'Profit Factor': f"{profit_factor:.2f}",
