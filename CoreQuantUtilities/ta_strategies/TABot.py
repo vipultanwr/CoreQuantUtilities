@@ -44,8 +44,7 @@ def getTACombinedSignals(input_df, returnall=False):
 
     # RSI is needed for HT_TRENDMODE
     rsi_signal = np.where(abstract.Function("RSI")(df) < 30, 1, np.where(abstract.Function("RSI")(df) > 70, -1, 0))
-    signals["RSI"] = rsi_signal
-
+    
     all_signals = {}
     all_signals.update(_get_candle_pattern_signals(df, all_funcs))
     all_signals.update(_get_price_transform_signals(df, all_funcs))
